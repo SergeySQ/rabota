@@ -252,7 +252,7 @@ function Get-ExcelColumnLetter {
 function Export-ReportSheet {
     param(
         [Parameter(Mandatory)][string]$WorksheetName,
-        [Parameter(Mandatory)]$Data,
+        $Data,
         [Parameter(Mandatory)][string]$Path,
         [switch]$Clear
     )
@@ -262,7 +262,7 @@ function Export-ReportSheet {
         $tableName = $tableName.Substring(0,30)
     }
 
-    if (-not $Data -or $Data.Count -eq 0) {
+    if ($null -eq $Data -or @($Data).Count -eq 0) {
         $Data = @([pscustomobject]@{ Message = 'No records found' })
     }
 
@@ -277,7 +277,12 @@ function Export-ReportSheet {
         ErrorAction   = 'Stop'
     }
 
-    if ($Clear) { $params.ClearSheet = $true }
+    if ($Clear) {
+        $params.ClearSheet = $true
+    }
+    else {
+        $params.Append = $true
+    }
 
     $Data | Export-Excel @params
 }
@@ -317,14 +322,14 @@ try {
     Write-Info "Total users retrieved: $($allUsers.Count)"
 
     Write-Info 'Preparing datasets...'
-    $allReport = $allUsers | ForEach-Object { Convert-ToReportUser -User $_ } | Select-ReportColumns
-    $cloudOnly = $allUsers |
+    $allReport = @($allUsers | ForEach-Object { Convert-ToReportUser -User $_ } | Select-ReportColumns)
+    $cloudOnly = @($allUsers |
         Where-Object { $_.OnPremisesSyncEnabled -ne $true } |
         ForEach-Object { Convert-ToReportUser -User $_ } |
-        Select-ReportColumns
+        Select-ReportColumns)
 
-    $dupDisplay = Get-DuplicatesByProperty -Users $allUsers -PropertyName 'DisplayName' -DuplicateType 'DisplayName' | Select-ReportColumns
-    $dupMail    = Get-DuplicatesByProperty -Users $allUsers -PropertyName 'Mail' -DuplicateType 'Mail' | Select-ReportColumns
+    $dupDisplay = @(Get-DuplicatesByProperty -Users $allUsers -PropertyName 'DisplayName' -DuplicateType 'DisplayName' | Select-ReportColumns)
+    $dupMail    = @(Get-DuplicatesByProperty -Users $allUsers -PropertyName 'Mail' -DuplicateType 'Mail' | Select-ReportColumns)
 
     $usersWithUpnPrefix = $allUsers | ForEach-Object {
         [pscustomobject]@{
@@ -336,15 +341,15 @@ try {
         Where-Object { -not [string]::IsNullOrWhiteSpace($_.UPNPrefix) } |
         Group-Object -Property UPNPrefix |
         Where-Object { $_.Count -gt 1 }
-    $dupUpnPrefix = foreach ($g in $upnGroups) {
+    $dupUpnPrefix = @(foreach ($g in $upnGroups) {
         foreach ($item in $g.Group) {
             Convert-ToReportUser -User $item.User -DuplicateType 'UPNPrefix' -DuplicateValue $g.Name -DuplicateCount $g.Count
         }
-    }
-    $dupUpnPrefix = $dupUpnPrefix | Sort-Object DuplicateValue, UserPrincipalName | Select-ReportColumns
+    })
+    $dupUpnPrefix = @($dupUpnPrefix | Sort-Object DuplicateValue, UserPrincipalName | Select-ReportColumns)
 
-    $dupProxy = Get-DuplicatesByProxyAddress -Users $allUsers | Select-ReportColumns
-    $suspicious = Get-SuspiciousUsers -Users $allUsers | Select-ReportColumns
+    $dupProxy = @(Get-DuplicatesByProxyAddress -Users $allUsers | Select-ReportColumns)
+    $suspicious = @(Get-SuspiciousUsers -Users $allUsers | Select-ReportColumns)
 
     $syncedCount = ($allUsers | Where-Object { $_.OnPremisesSyncEnabled -eq $true }).Count
     $cloudCount  = ($allUsers | Where-Object { $_.OnPremisesSyncEnabled -ne $true }).Count
