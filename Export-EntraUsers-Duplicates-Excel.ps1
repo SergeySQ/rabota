@@ -151,9 +151,9 @@ function Get-DuplicatesByProxyAddress {
 
         foreach ($addr in $u.ProxyAddresses) {
             if ([string]::IsNullOrWhiteSpace($addr)) { continue }
-            if ($addr -notmatch '^(?i)smtp:') { continue }
+            if ($addr -notmatch '(?i)^smtp:') { continue }
 
-            $normalized = ($addr -replace '^(?i)smtp:','').Trim().ToLowerInvariant()
+            $normalized = ($addr -replace '(?i)^smtp:', '').Trim().ToLowerInvariant()
             if ([string]::IsNullOrWhiteSpace($normalized)) { continue }
 
             [pscustomobject]@{
