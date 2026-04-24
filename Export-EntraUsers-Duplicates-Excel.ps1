@@ -385,7 +385,7 @@ try {
         if ($wsSuspicious -and $wsSuspicious.Dimension) {
             $endRow = $wsSuspicious.Dimension.End.Row
             $endCol = $wsSuspicious.Dimension.End.Column
-            $sheetRange = "A2:$([OfficeOpenXml.ExcelCellAddress]::GetAddress($endRow,$endCol))"
+            $sheetRange = $wsSuspicious.Cells[2,1,$endRow,$endCol].Address
 
             $headerMap = @{}
             for ($c = 1; $c -le $endCol; $c++) {
