@@ -385,24 +385,27 @@ try {
         if ($wsSuspicious -and $wsSuspicious.Dimension) {
             $endRow = $wsSuspicious.Dimension.End.Row
             $endCol = $wsSuspicious.Dimension.End.Column
-            $sheetRange = $wsSuspicious.Cells[2,1,$endRow,$endCol].Address
+            if ($endRow -ge 2 -and $endCol -ge 1) {
+                $endColLetter = Get-ExcelColumnLetter -ColumnNumber $endCol
+                $sheetRange = "A2:{0}{1}" -f $endColLetter, $endRow
 
-            $headerMap = @{}
-            for ($c = 1; $c -le $endCol; $c++) {
-                $headerMap[$wsSuspicious.Cells[1,$c].Text] = $c
-            }
+                $headerMap = @{}
+                for ($c = 1; $c -le $endCol; $c++) {
+                    $headerMap[$wsSuspicious.Cells[1,$c].Text] = $c
+                }
 
-            if ($headerMap.ContainsKey('Source')) {
-                $srcCol = $headerMap['Source']
-                $srcColLetter = Get-ExcelColumnLetter -ColumnNumber $srcCol
-                Add-ConditionalFormatting -Worksheet $wsSuspicious -Address $sheetRange -RuleType Expression -ConditionValue "=\$$srcColLetter`2=""Cloud-only / Manual or cloud-created""" -ForegroundColor Black -BackgroundColor '#FFF2CC' -StopIfTrue:$false -ErrorAction Stop -PassThru | Out-Null
-                Add-ConditionalFormatting -Worksheet $wsSuspicious -Address $sheetRange -RuleType Expression -ConditionValue "=\$$srcColLetter`2=""Synced from on-prem AD""" -ForegroundColor Black -BackgroundColor '#E2F0D9' -StopIfTrue:$false -ErrorAction Stop -PassThru | Out-Null
-            }
+                if ($headerMap.ContainsKey('Source')) {
+                    $srcCol = $headerMap['Source']
+                    $srcColLetter = Get-ExcelColumnLetter -ColumnNumber $srcCol
+                    Add-ConditionalFormatting -Worksheet $wsSuspicious -Address $sheetRange -RuleType Expression -ConditionValue "=\$$srcColLetter`2=""Cloud-only / Manual or cloud-created""" -ForegroundColor Black -BackgroundColor '#FFF2CC' -StopIfTrue:$false -ErrorAction Stop -PassThru | Out-Null
+                    Add-ConditionalFormatting -Worksheet $wsSuspicious -Address $sheetRange -RuleType Expression -ConditionValue "=\$$srcColLetter`2=""Synced from on-prem AD""" -ForegroundColor Black -BackgroundColor '#E2F0D9' -StopIfTrue:$false -ErrorAction Stop -PassThru | Out-Null
+                }
 
-            if ($headerMap.ContainsKey('AccountEnabled')) {
-                $enabledCol = $headerMap['AccountEnabled']
-                $enabledColLetter = Get-ExcelColumnLetter -ColumnNumber $enabledCol
-                Add-ConditionalFormatting -Worksheet $wsSuspicious -Address $sheetRange -RuleType Expression -ConditionValue "=\$$enabledColLetter`2=FALSE" -ForegroundColor Black -BackgroundColor '#F8CBAD' -StopIfTrue:$false -ErrorAction Stop -PassThru | Out-Null
+                if ($headerMap.ContainsKey('AccountEnabled')) {
+                    $enabledCol = $headerMap['AccountEnabled']
+                    $enabledColLetter = Get-ExcelColumnLetter -ColumnNumber $enabledCol
+                    Add-ConditionalFormatting -Worksheet $wsSuspicious -Address $sheetRange -RuleType Expression -ConditionValue "=\$$enabledColLetter`2=FALSE" -ForegroundColor Black -BackgroundColor '#F8CBAD' -StopIfTrue:$false -ErrorAction Stop -PassThru | Out-Null
+                }
             }
         }
 
