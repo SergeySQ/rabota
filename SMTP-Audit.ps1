@@ -59,7 +59,6 @@ function Normalize-SmtpEndpoint {
 
     if ([string]::IsNullOrWhiteSpace($value)) { return $null }
     if ($value -eq '*') { return $null }
-    if ($value -eq 'SMTP:*') { return $null }
 
     return $value
 }
@@ -92,50 +91,156 @@ function Invoke-DnsTcpAudit {
 
     foreach ($endpoint in $Endpoints) {
         $normalized = Normalize-SmtpEndpoint -RawValue $endpoint.Endpoint
-        if ([string]::IsNullOrWhiteSpace($normalized)) { continue }
+        if ([string]::IsNullOrWhiteSpace($normalized)) {
+            $results += [PSCustomObject]@{
+                SourceType        = $endpoint.SourceType
+                SourceObject      = $endpoint.SourceObject
+                RawValue          = $endpoint.Endpoint
+                NormalizedValue   = $null
+                IsIpAddress       = $false
+                ARecords          = ''
+                MXRecords         = ''
+                Tcp25ToEndpoint   = $false
+                MxTcp25Summary    = ''
+                DnsResolved       = $false
+                Status            = 'Skipped'
+                Severity          = 'None'
+                Errors            = ''
+                RecommendedAction = 'Skipped wildcard/default route endpoint.'
+            }
+            continue
+        }
 
-        $isIp = [System.Net.IPAddress]::TryParse($normalized, [ref]([System.Net.IPAddress]::Any))
+        $ipObj = $null
+        $isIp = [System.Net.IPAddress]::TryParse($normalized, [ref]$ipObj)
         $aRecords = @()
         $mxRecords = @()
         $tcp25 = $false
         $mxTcpResults = @()
         $errors = @()
+        $status = 'Informational'
+        $severity = 'Low'
+        $recommendedAction = 'Review endpoint reachability details.'
 
-        if (-not $isIp) {
-            try {
-                $aLookup = Resolve-DnsName -Name $normalized -Type A -ErrorAction Stop
-                $aRecords = @($aLookup | ForEach-Object { $_.IPAddress } | Where-Object { $_ })
-            } catch {
-                $errors += "A lookup failed: $($_.Exception.Message)"
+        switch ($endpoint.SourceType) {
+            'SendConnector.SmartHost' {
+                if (-not $isIp) {
+                    try {
+                        $aLookup = Resolve-DnsName -Name $normalized -Type A -ErrorAction Stop
+                        $aRecords = @($aLookup | ForEach-Object { $_.IPAddress } | Where-Object { $_ })
+                    } catch {
+                        $errors += "A lookup failed: $($_.Exception.Message)"
+                    }
+                }
+                try {
+                    $tcp = Test-NetConnection -ComputerName $normalized -Port 25 -WarningAction SilentlyContinue
+                    $tcp25 = [bool]$tcp.TcpTestSucceeded
+                } catch {
+                    $errors += "TCP25 failed: $($_.Exception.Message)"
+                }
+                if ($tcp25) {
+                    $status = 'OK'
+                    $severity = 'None'
+                    $recommendedAction = 'SmartHost is reachable on TCP 25.'
+                } else {
+                    $status = 'IssueDetected'
+                    $severity = 'High'
+                    $recommendedAction = 'SmartHost TCP 25 unavailable. Check firewall, route, or host state.'
+                }
             }
+            'SendConnector.AddressSpace' {
+                if (-not $isIp) {
+                    try {
+                        $mxLookup = Resolve-DnsName -Name $normalized -Type MX -ErrorAction Stop
+                        $mxRecords = @($mxLookup | Sort-Object Preference | ForEach-Object { $_.NameExchange.TrimEnd('.') } | Where-Object { $_ })
+                    } catch {
+                        $errors += "MX lookup failed: $($_.Exception.Message)"
+                    }
+                    try {
+                        $aLookup = Resolve-DnsName -Name $normalized -Type A -ErrorAction Stop
+                        $aRecords = @($aLookup | ForEach-Object { $_.IPAddress } | Where-Object { $_ })
+                    } catch {
+                        $errors += "A lookup failed: $($_.Exception.Message)"
+                    }
+                }
 
-            try {
-                $mxLookup = Resolve-DnsName -Name $normalized -Type MX -ErrorAction Stop
-                $mxRecords = @($mxLookup | Sort-Object Preference | ForEach-Object { $_.NameExchange.TrimEnd('.') } | Where-Object { $_ })
-            } catch {
-                $errors += "MX lookup failed: $($_.Exception.Message)"
+                if ($mxRecords.Count -gt 0) {
+                    foreach ($mx in $mxRecords) {
+                        $mxTcp = $false
+                        try {
+                            $mxTcpResult = Test-NetConnection -ComputerName $mx -Port 25 -WarningAction SilentlyContinue
+                            $mxTcp = [bool]$mxTcpResult.TcpTestSucceeded
+                        } catch {
+                            $errors += "MX TCP25 failed ($mx): $($_.Exception.Message)"
+                        }
+                        $mxTcpResults += [PSCustomObject]@{
+                            MXHost = $mx
+                            Tcp25  = $mxTcp
+                        }
+                    }
+
+                    if ((@($mxTcpResults | Where-Object { $_.Tcp25 })).Count -gt 0) {
+                        $status = 'OK'
+                        $severity = 'None'
+                        $recommendedAction = 'At least one MX host is reachable on TCP 25.'
+                    } else {
+                        $status = 'IssueDetected'
+                        $severity = 'High'
+                        $recommendedAction = 'MX exists but TCP 25 is unavailable. Check mail route/firewall.'
+                    }
+                } else {
+                    try {
+                        $tcp = Test-NetConnection -ComputerName $normalized -Port 25 -WarningAction SilentlyContinue
+                        $tcp25 = [bool]$tcp.TcpTestSucceeded
+                    } catch {
+                        $errors += "TCP25 failed: $($_.Exception.Message)"
+                    }
+
+                    if ($aRecords.Count -gt 0 -and $tcp25) {
+                        $status = 'OK'
+                        $severity = 'None'
+                        $recommendedAction = 'No MX but A record and TCP 25 are available.'
+                    } elseif ($aRecords.Count -gt 0 -and -not $tcp25) {
+                        $status = 'Warning'
+                        $severity = 'Medium'
+                        $recommendedAction = 'DNS resolved but TCP 25 not confirmed. Validate if domain accepts direct SMTP.'
+                    } else {
+                        $status = 'IssueDetected'
+                        $severity = 'High'
+                        $recommendedAction = 'No MX/A records for address space endpoint. Validate target domain configuration.'
+                    }
+                }
             }
-        }
+            'AcceptedDomain' {
+                if (-not $isIp) {
+                    try {
+                        $mxLookup = Resolve-DnsName -Name $normalized -Type MX -ErrorAction Stop
+                        $mxRecords = @($mxLookup | Sort-Object Preference | ForEach-Object { $_.NameExchange.TrimEnd('.') } | Where-Object { $_ })
+                    } catch {
+                        $errors += "MX lookup failed: $($_.Exception.Message)"
+                    }
+                    try {
+                        $aLookup = Resolve-DnsName -Name $normalized -Type A -ErrorAction Stop
+                        $aRecords = @($aLookup | ForEach-Object { $_.IPAddress } | Where-Object { $_ })
+                    } catch {
+                        $errors += "A lookup failed: $($_.Exception.Message)"
+                    }
+                }
 
-        try {
-            $tcp = Test-NetConnection -ComputerName $normalized -Port 25 -WarningAction SilentlyContinue
-            $tcp25 = [bool]$tcp.TcpTestSucceeded
-        } catch {
-            $errors += "TCP25 failed: $($_.Exception.Message)"
-        }
-
-        foreach ($mx in $mxRecords) {
-            $mxTcp = $false
-            try {
-                $mxTcpResult = Test-NetConnection -ComputerName $mx -Port 25 -WarningAction SilentlyContinue
-                $mxTcp = [bool]$mxTcpResult.TcpTestSucceeded
-            } catch {
-                $errors += "MX TCP25 failed ($mx): $($_.Exception.Message)"
+                if ($mxRecords.Count -gt 0 -or $aRecords.Count -gt 0) {
+                    $status = 'Informational'
+                    $severity = 'Low'
+                    $recommendedAction = 'AcceptedDomain DNS inventory collected.'
+                } else {
+                    $status = 'Warning'
+                    $severity = 'Low'
+                    $recommendedAction = 'AcceptedDomain has no DNS/MX records. Verify only if external mail flow depends on it.'
+                }
             }
-
-            $mxTcpResults += [PSCustomObject]@{
-                MXHost = $mx
-                Tcp25  = $mxTcp
+            default {
+                $status = 'Informational'
+                $severity = 'Low'
+                $recommendedAction = 'No specific validation profile for source type.'
             }
         }
 
@@ -146,22 +251,21 @@ function Invoke-DnsTcpAudit {
             $dnsOk = $true
         }
 
-        $mxFailed = ($mxTcpResults | Where-Object { -not $_.Tcp25 }).Count -gt 0
-        $status = if (-not $dnsOk -or -not $tcp25 -or $mxFailed) { 'IssueDetected' } else { 'OK' }
-
         $results += [PSCustomObject]@{
-            SourceType      = $endpoint.SourceType
-            SourceObject    = $endpoint.SourceObject
-            RawValue        = $endpoint.Endpoint
-            NormalizedValue = $normalized
-            IsIpAddress     = $isIp
-            ARecords        = ($aRecords -join ';')
-            MXRecords       = ($mxRecords -join ';')
-            Tcp25ToEndpoint = $tcp25
-            MxTcp25Summary  = (($mxTcpResults | ForEach-Object { "$($_.MXHost)=$($_.Tcp25)" }) -join ';')
-            DnsResolved     = $dnsOk
-            Status          = $status
-            Errors          = ($errors -join ' | ')
+            SourceType        = $endpoint.SourceType
+            SourceObject      = $endpoint.SourceObject
+            RawValue          = $endpoint.Endpoint
+            NormalizedValue   = $normalized
+            IsIpAddress       = $isIp
+            ARecords          = ($aRecords -join ';')
+            MXRecords         = ($mxRecords -join ';')
+            Tcp25ToEndpoint   = $tcp25
+            MxTcp25Summary    = (($mxTcpResults | ForEach-Object { "$($_.MXHost)=$($_.Tcp25)" }) -join ';')
+            DnsResolved       = $dnsOk
+            Status            = $status
+            Severity          = $severity
+            Errors            = ($errors -join ' | ')
+            RecommendedAction = $recommendedAction
         }
     }
 
@@ -188,11 +292,13 @@ try {
     }
 
     Write-Stage "Сбор Message Tracking логов за период $DaysBack дней (с $startDate по $endDate)"
+    Write-Host "  Внимание: сбор MessageTracking за большой период может занять длительное время..." -ForegroundColor Yellow
     $rawTracking = @()
     foreach ($srv in $transportServers) {
         Write-Host "  -> Сервер: $srv" -ForegroundColor DarkCyan
         try {
-            $chunk = Get-MessageTrackingLog -Server $srv -Start $startDate -End $endDate -EventId $eventsOfInterest -ResultSize Unlimited
+            $chunk = Get-MessageTrackingLog -Server $srv -Start $startDate -End $endDate -ResultSize Unlimited |
+                Where-Object { $eventsOfInterest -contains $_.EventId }
             foreach ($row in $chunk) {
                 $rawTracking += [PSCustomObject]@{
                     Timestamp       = $row.Timestamp
@@ -209,7 +315,7 @@ try {
                 }
             }
         } catch {
-            Write-Host "  ! Ошибка на $srv: $($_.Exception.Message)" -ForegroundColor Yellow
+            Write-Host "  ! Ошибка на $srv: $($_.Exception.Message). Продолжаем обработку других серверов." -ForegroundColor Yellow
         }
     }
 
@@ -332,7 +438,7 @@ try {
             $recommendedAction = if ($receiveCount -gt 0) {
                 'Keep; monitor usage and permission scope.'
             } else {
-                'No RECEIVE usage found; verify if still required.'
+                'Check SMTP protocol logs and service owner before disabling. MessageTracking may not show all relay/connection usage.'
             }
 
             if ($isAnonymous) {
@@ -435,14 +541,25 @@ try {
     $dnsTcpAudit | Export-Csv -Path $dnsTcpFile -NoTypeInformation -Encoding UTF8
     $reportFiles += $dnsTcpFile
 
-    foreach ($item in ($dnsTcpAudit | Where-Object { $_.Status -eq 'IssueDetected' })) {
-        $reviewCandidates += [PSCustomObject]@{
-            ObjectType        = 'DnsTcpEndpoint'
-            Name              = "$($item.SourceObject)::$($item.NormalizedValue)"
-            Status            = 'DnsOrTcpIssue'
-            Risk              = 'Medium'
-            Details           = "DnsResolved=$($item.DnsResolved); Tcp25ToEndpoint=$($item.Tcp25ToEndpoint); MxTcp25Summary=$($item.MxTcp25Summary); Errors=$($item.Errors)"
-            RecommendedAction = 'Validate DNS records/firewall/routing and external endpoint availability.'
+    foreach ($item in ($dnsTcpAudit | Where-Object { $_.Status -in @('IssueDetected','Warning') })) {
+        if ($item.SourceType -eq 'AcceptedDomain') {
+            $reviewCandidates += [PSCustomObject]@{
+                ObjectType        = 'DnsTcpEndpoint'
+                Name              = "$($item.SourceObject)::$($item.NormalizedValue)"
+                Status            = $item.Status
+                Risk              = 'Low'
+                Details           = "AcceptedDomain DNS inventory note. DnsResolved=$($item.DnsResolved); Errors=$($item.Errors)"
+                RecommendedAction = 'Informational: verify only if this accepted domain is expected to resolve publicly.'
+            }
+        } else {
+            $reviewCandidates += [PSCustomObject]@{
+                ObjectType        = 'DnsTcpEndpoint'
+                Name              = "$($item.SourceObject)::$($item.NormalizedValue)"
+                Status            = $item.Status
+                Risk              = $item.Severity
+                Details           = "DnsResolved=$($item.DnsResolved); Tcp25ToEndpoint=$($item.Tcp25ToEndpoint); MxTcp25Summary=$($item.MxTcp25Summary); Errors=$($item.Errors)"
+                RecommendedAction = $item.RecommendedAction
+            }
         }
     }
 
